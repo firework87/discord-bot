@@ -1,68 +1,43 @@
+from flask import Flask
+from threading import Thread
+import os
+
+# ========== Web 伺服器（讓 Render 知道服務活著）==========
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "🤖 Bot is running!"
+
+def run_web():
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
+
+Thread(target=run_web).start()
+
+# ========== Discord Bot ==========
 import discord
 from discord.ext import commands
 from openai import OpenAI
-import requests
-import os
-
-# ========== 設定區 ==========
-from dotenv import load_dotenv
-load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY_API_KEY")
-
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
 )
 
-# ========== 自動抓取可用免費模型 ==========
-def get_free_models():
-    """從 OpenRouter API 抓取目前可用的免費模型"""
-    try:
-        resp = requests.get(
-            "https://openrouter.ai/api/v1/models",
-            headers={"Authorization": f"Bearer {OPENROUTER_KEY}"}
-        )
-        data = resp.json()
-        
-        free_models = []
-        for m in data.get("data", []):
-            model_id = m.get("id", "")
-            # 找免費模型（價格為 0 或名稱含 free）
-            pricing = m.get("pricing", {})
-            is_free = all(
-                float(pricing.get(k, 999)) == 0 
-                for k in ["prompt", "completion", "image", "request"]
-            )
-            if is_free or ":free" in model_id:
-                free_models.append(model_id)
-        
-        print(f"✅ 找到 {len(free_models)} 個免費模型")
-        for fm in free_models[:5]:
-            print(f"   - {fm}")
-        return free_models
-        
-    except Exception as e:
-        print(f"❌ 抓取模型失敗：{e}")
-        return []
+FREE_MODELS = [
+    "google/gemini-2.0-flash-lite-preview-02-05:free",
+    "google/gemini-2.0-pro-exp-02-05:free",
+    "meta-llama/llama-3.2-3b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+    "deepseek/deepseek-chat:free",
+]
 
-# 取得免費模型列表
-FREE_MODELS = get_free_models()
+CURRENT_MODEL = FREE_MODELS[0]
 
-# 如果抓不到，用預設備用
-if not FREE_MODELS:
-    FREE_MODELS = [
-        "meta-llama/llama-3.2-3b-instruct:free",
-        "mistralai/mistral-7b-instruct:free", 
-        "huggingfaceh4/zephyr-7b-beta:free",
-    ]
-    print("⚠️ 使用預設備用模型")
-
-CURRENT_MODEL = FREE_MODELS[0] if FREE_MODELS else None
-
-# ========== Discord 設定 ==========
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -72,15 +47,11 @@ chat_sessions = {}
 @bot.event
 async def on_ready():
     print(f"✅ 機器人已上線：{bot.user}")
-    if CURRENT_MODEL:
-        print(f"使用模型：{CURRENT_MODEL}")
-    else:
-        print("❌ 沒有可用的免費模型！")
+    print(f"使用模型：{CURRENT_MODEL}")
 
 def ask_ai(question, model_index=0):
-    """呼叫 AI，自動切換模型"""
-    if not FREE_MODELS or model_index >= len(FREE_MODELS):
-        return "❌ 目前沒有可用的免費模型，請稍後再試或查看 https://openrouter.ai/models"
+    if model_index >= len(FREE_MODELS):
+        return "❌ 所有免費模型都暫時無法使用，請稍後再試。"
     
     model = FREE_MODELS[model_index]
     
@@ -99,7 +70,6 @@ def ask_ai(question, model_index=0):
         error_msg = str(e)
         print(f"⚠️ {model} 失敗：{error_msg[:100]}")
         
-        # 自動切換下一個
         if any(x in error_msg for x in ["404", "400", "rate limit", "quota", "not a valid"]):
             return ask_ai(question, model_index + 1)
         raise e
@@ -134,7 +104,6 @@ async def chat(ctx, *, message):
             if len(chat_sessions[user_id]) > 12:
                 chat_sessions[user_id] = [chat_sessions[user_id][0]] + chat_sessions[user_id][-10:]
             
-            # 嘗試每個模型
             answer = None
             for model in FREE_MODELS:
                 try:
@@ -145,8 +114,7 @@ async def chat(ctx, *, message):
                     )
                     answer = response.choices[0].message.content
                     break
-                except Exception as e:
-                    print(f"⚠️ {model} 失敗")
+                except:
                     continue
             
             if not answer:
@@ -171,12 +139,6 @@ async def reset(ctx):
         await ctx.reply("🗑️ 對話記憶已清除！")
     else:
         await ctx.reply("ℹ️ 沒有對話記憶需要清除")
-
-@bot.command()
-async def models(ctx):
-    """查看目前可用的免費模型"""
-    model_list = "\n".join([f"• `{m}`" for m in FREE_MODELS[:10]])
-    await ctx.reply(f"📋 目前可用的免費模型（前10個）：\n{model_list}")
 
 @bot.event
 async def on_message(message):
