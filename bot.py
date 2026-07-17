@@ -1,6 +1,8 @@
 from flask import Flask
 from threading import Thread
 import os
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 # ========== Web 伺服器（讓 Render 知道服務活著）==========
 app = Flask('')
@@ -38,6 +40,9 @@ FREE_MODELS = [
 
 CURRENT_MODEL = FREE_MODELS[0]
 
+# 執行緒池
+executor = ThreadPoolExecutor(max_workers=2)
+
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -49,7 +54,8 @@ async def on_ready():
     print(f"✅ 機器人已上線：{bot.user}")
     print(f"使用模型：{CURRENT_MODEL}")
 
-def ask_ai(question, model_index=0):
+def _ask_ai_sync(question, model_index=0):
+    """同步版本（在背景執行緒跑）"""
     if model_index >= len(FREE_MODELS):
         return "❌ 所有免費模型都暫時無法使用，請稍後再試。"
     
@@ -71,14 +77,19 @@ def ask_ai(question, model_index=0):
         print(f"⚠️ {model} 失敗：{error_msg[:100]}")
         
         if any(x in error_msg for x in ["404", "400", "rate limit", "quota", "not a valid"]):
-            return ask_ai(question, model_index + 1)
+            return _ask_ai_sync(question, model_index + 1)
         raise e
+
+async def ask_ai(question, model_index=0):
+    """非同步版本（不阻塞 Discord）"""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(executor, _ask_ai_sync, question, model_index)
 
 @bot.command()
 async def ask(ctx, *, question):
     async with ctx.typing():
         try:
-            answer = ask_ai(question)
+            answer = await ask_ai(question)
             
             if len(answer) > 1900:
                 for i in range(0, len(answer), 1900):
@@ -107,14 +118,19 @@ async def chat(ctx, *, message):
             answer = None
             for model in FREE_MODELS:
                 try:
-                    response = client.chat.completions.create(
-                        model=model,
-                        messages=chat_sessions[user_id],
-                        max_tokens=1000,
+                    loop = asyncio.get_event_loop()
+                    response = await loop.run_in_executor(
+                        executor,
+                        lambda: client.chat.completions.create(
+                            model=model,
+                            messages=chat_sessions[user_id],
+                            max_tokens=1000,
+                        )
                     )
                     answer = response.choices[0].message.content
                     break
-                except:
+                except Exception as e:
+                    print(f"⚠️ {model} 失敗")
                     continue
             
             if not answer:
@@ -150,7 +166,7 @@ async def on_message(message):
         if clean_text:
             async with message.channel.typing():
                 try:
-                    answer = ask_ai(clean_text)
+                    answer = await ask_ai(clean_text)
                     await message.reply(f"🤖 {answer}")
                 except Exception as e:
                     await message.reply(f"❌ 錯誤：{str(e)[:300]}")
