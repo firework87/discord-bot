@@ -30,13 +30,38 @@ client = OpenAI(
     api_key=OPENROUTER_KEY,
 )
 
-FREE_MODELS = [
-    "google/gemini-2.0-flash-lite-preview-02-05:free",
-    "google/gemini-2.0-pro-exp-02-05:free",
-    "meta-llama/llama-3.2-3b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "deepseek/deepseek-chat:free",
-]
+def get_free_models():
+    """從 OpenRouter API 抓取目前可用的免費模型"""
+    try:
+        resp = requests.get(
+            "https://openrouter.ai/api/v1/models",
+            headers={"Authorization": f"Bearer {OPENROUTER_KEY}"}
+        )
+        data = resp.json()
+        
+        free_models = []
+        for m in data.get("data", []):
+            model_id = m.get("id", "")
+            # 找免費模型（價格為 0 或名稱含 free）
+            pricing = m.get("pricing", {})
+            is_free = all(
+                float(pricing.get(k, 999)) == 0 
+                for k in ["prompt", "completion", "image", "request"]
+            )
+            if is_free or ":free" in model_id:
+                free_models.append(model_id)
+        
+        print(f"✅ 找到 {len(free_models)} 個免費模型")
+        for fm in free_models[:5]:
+            print(f"   - {fm}")
+        return free_models
+        
+    except Exception as e:
+        print(f"❌ 抓取模型失敗：{e}")
+        return []
+
+# 取得免費模型列表
+FREE_MODELS = get_free_models()
 
 CURRENT_MODEL = FREE_MODELS[0]
 
