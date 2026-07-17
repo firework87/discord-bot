@@ -21,7 +21,7 @@ from discord.ext import commands
 from openai import OpenAI
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+OPENROUTER_KEY = os.getenv("OPENROUTER_KEY_API_KEY")
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
