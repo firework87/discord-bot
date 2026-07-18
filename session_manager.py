@@ -6,10 +6,13 @@ from config import DEFAULT_SYSTEM_PROMPT, SESSION_TIMEOUT
 import db
 
 # ========== 初始化 ==========
-db.init_db()
-
-# 從 DB 載入所有自訂提示詞到記憶體快取
-user_prompts = db.load_all_prompts()
+try:
+    db.init_db()
+    user_prompts = db.load_all_prompts()
+except Exception as e:
+    print(f"⚠️  資料庫初始化失敗：{e}")
+    print("💡 將以無持久化模式運行（對話重啟後消失）")
+    user_prompts = {}
 user_prompts_lock = Lock()
 
 # ========== 對話 Session（記憶體快取）==========
