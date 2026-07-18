@@ -1,224 +1,202 @@
-from flask import Flask
-from threading import Thread
-import os
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
-import requests  # ✅ 修正：加入 import
+﻿"""bot.py — Discord AI Bot 主入口：指令、事件、啟動"""
 
-# ========== Web 伺服器（讓 Render 知道服務活著）==========
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "🤖 Bot is running!"
-
-def run_web():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
-
-Thread(target=run_web).start()
-
-# ========== Discord Bot ==========
+import time
 import discord
 from discord.ext import commands
-from openai import OpenAI
 
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-OPENROUTER_KEY = os.getenv("OPENROUTER_KEY_API_KEY")
-
-client = OpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_KEY,
+from config import DISCORD_TOKEN, FREE_MODELS, CURRENT_MODEL
+from web_server import start_web_server
+from ai_client import ask_ai, safe_typing, send_long_message
+from session_manager import (
+    chat_sessions, chat_sessions_lock,
+    cleanup_old_sessions,
+    get_system_prompt,
+    set_user_prompt, reset_user_prompt,
+    has_custom_prompt,
 )
 
-# 預設備用模型（如果 API 抓不到）
-DEFAULT_FREE_MODELS = [
-    "meta-llama/llama-3.2-3b-instruct:free",
-    "mistralai/mistral-7b-instruct:free",
-    "deepseek/deepseek-chat:free",
-    "huggingfaceh4/zephyr-7b-beta:free",
-]
-
-def get_free_models():
-    """從 OpenRouter API 抓取目前可用的免費模型"""
-    try:
-        resp = requests.get(
-            "https://openrouter.ai/api/v1/models",
-            headers={"Authorization": f"Bearer {OPENROUTER_KEY}"},
-            timeout=10
-        )
-        data = resp.json()
-        
-        free_models = []
-        for m in data.get("data", []):
-            model_id = m.get("id", "")
-            pricing = m.get("pricing", {})
-            # 檢查是否免費（所有價格為 0）
-            is_free = all(
-                float(pricing.get(k, 999)) == 0 
-                for k in ["prompt", "completion", "image", "request"]
-            )
-            if is_free or ":free" in model_id:
-                free_models.append(model_id)
-        
-        print(f"✅ 找到 {len(free_models)} 個免費模型")
-        for fm in free_models[:5]:
-            print(f"   - {fm}")
-        return free_models
-        
-    except Exception as e:
-        print(f"❌ 抓取模型失敗：{e}")
-        return []
-
-# 取得免費模型列表
-FREE_MODELS = get_free_models()
-
-# ✅ 修正：如果抓不到，用預設備用
-if not FREE_MODELS:
-    FREE_MODELS = DEFAULT_FREE_MODELS
-    print("⚠️ 使用預設備用模型")
-
-CURRENT_MODEL = FREE_MODELS[0] if FREE_MODELS else None
-print(f"🎯 當前使用模型：{CURRENT_MODEL}")
-
-# 執行緒池
-executor = ThreadPoolExecutor(max_workers=2)
-
+# ========== Discord Bot 初始化 ==========
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-chat_sessions = {}
+
+# ========== 事件 ==========
 
 @bot.event
 async def on_ready():
     print(f"✅ 機器人已上線：{bot.user}")
     print(f"使用模型：{CURRENT_MODEL}")
 
-def _ask_ai_sync(question, model_index=0):
-    """同步版本（在背景執行緒跑）"""
-    if model_index >= len(FREE_MODELS):
-        return "❌ 所有免費模型都暫時無法使用，請稍後再試。"
-    
-    model = FREE_MODELS[model_index]
-    
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": "你是一個有幫助的助手，用繁體中文回答。"},
-                {"role": "user", "content": question}
-            ],
-            max_tokens=1000,
-        )
-        return response.choices[0].message.content
-        
-    except Exception as e:
-        error_msg = str(e)
-        print(f"⚠️ {model} 失敗：{error_msg[:150]}")
-        
-        # ✅ 修正：更精確判斷是否需要切換模型
-        if any(x in error_msg for x in ["404", "400", "rate limit", "quota", "not a valid", "exceeded"]):
-            return _ask_ai_sync(question, model_index + 1)
-        raise e
-
-async def ask_ai(question, model_index=0):
-    """非同步版本（不阻塞 Discord）"""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(executor, _ask_ai_sync, question, model_index)
-
-@bot.command()
-async def ask(ctx, *, question):
-    async with ctx.typing():
-        try:
-            answer = await ask_ai(question)
-            
-            if len(answer) > 1900:
-                for i in range(0, len(answer), 1900):
-                    await ctx.send(answer[i:i+1900])
-            else:
-                await ctx.reply(f"🤖 {answer}")
-        except Exception as e:
-            await ctx.reply(f"❌ 出錯：{str(e)[:500]}")
-
-@bot.command()
-async def chat(ctx, *, message):
-    user_id = str(ctx.author.id)
-    
-    async with ctx.typing():
-        try:
-            if user_id not in chat_sessions:
-                chat_sessions[user_id] = [
-                    {"role": "system", "content": "你是一個有幫助的助手，用繁體中文回答。"}
-                ]
-            
-            chat_sessions[user_id].append({"role": "user", "content": message})
-            
-            if len(chat_sessions[user_id]) > 12:
-                chat_sessions[user_id] = [chat_sessions[user_id][0]] + chat_sessions[user_id][-10:]
-            
-            answer = None
-            for model in FREE_MODELS:
-                try:
-                    loop = asyncio.get_event_loop()
-                    response = await loop.run_in_executor(
-                        executor,
-                        lambda m=model: client.chat.completions.create(
-                            model=m,
-                            messages=chat_sessions[user_id],
-                            max_tokens=1000,
-                        )
-                    )
-                    answer = response.choices[0].message.content
-                    break
-                except Exception as e:
-                    print(f"⚠️ {model} 失敗：{str(e)[:100]}")
-                    continue
-            
-            if not answer:
-                answer = "❌ 所有模型都暫時無法使用"
-            
-            chat_sessions[user_id].append({"role": "assistant", "content": answer})
-            
-            if len(answer) > 1900:
-                for i in range(0, len(answer), 1900):
-                    await ctx.send(answer[i:i+1900])
-            else:
-                await ctx.reply(f"🤖 {answer}")
-                
-        except Exception as e:
-            await ctx.reply(f"❌ 出錯：{str(e)[:500]}")
-
-@bot.command()
-async def reset(ctx):
-    user_id = str(ctx.author.id)
-    if user_id in chat_sessions:
-        del chat_sessions[user_id]
-        await ctx.reply("🗑️ 對話記憶已清除！")
-    else:
-        await ctx.reply("ℹ️ 沒有對話記憶需要清除")
-
-@bot.command()
-async def models(ctx):
-    """查看目前可用的模型"""
-    model_list = "\n".join([f"• `{m}`" for m in FREE_MODELS[:10]])
-    await ctx.reply(f"📋 目前模型列表：\n{model_list}")
 
 @bot.event
 async def on_message(message):
+    """處理 @提及 訊息"""
     if message.author == bot.user:
         return
-    
+
     if bot.user.mentioned_in(message):
         clean_text = message.content.replace(f"<@{bot.user.id}>", "").strip()
         if clean_text:
-            async with message.channel.typing():
-                try:
-                    answer = await ask_ai(clean_text)
-                    await message.reply(f"🤖 {answer}")
-                except Exception as e:
-                    await message.reply(f"❌ 錯誤：{str(e)[:300]}")
-    
+            await safe_typing(message.channel)
+            try:
+                user_id = str(message.author.id)
+                messages = [
+                    {"role": "system", "content": get_system_prompt(user_id)},
+                    {"role": "user", "content": clean_text}
+                ]
+                answer = await ask_ai(messages)
+                await message.reply(f"🤖 {answer}")
+            except Exception as e:
+                await message.reply(f"❌ 錯誤：{str(e)[:300]}")
+
     await bot.process_commands(message)
 
-bot.run(DISCORD_TOKEN)
+
+# ========== 指令 ==========
+
+@bot.command()
+async def ask(ctx, *, question):
+    """單次問答（無記憶）"""
+    await safe_typing(ctx)
+    try:
+        user_id = str(ctx.author.id)
+        messages = [
+            {"role": "system", "content": get_system_prompt(user_id)},
+            {"role": "user", "content": question}
+        ]
+        answer = await ask_ai(messages)
+
+        if len(answer) > 1900:
+            await send_long_message(ctx, answer)
+        else:
+            await ctx.reply(f"🤖 {answer}")
+    except Exception as e:
+        await ctx.reply(f"❌ 出錯：{str(e)[:500]}")
+
+
+@bot.command()
+async def chat(ctx, *, message):
+    """有記憶的對話"""
+    user_id = str(ctx.author.id)
+
+    await safe_typing(ctx)
+    try:
+        with chat_sessions_lock:
+            cleanup_old_sessions()
+
+            if user_id not in chat_sessions:
+                chat_sessions[user_id] = {
+                    "messages": [
+                        {"role": "system", "content": get_system_prompt(user_id)}
+                    ],
+                    "_last_access": time.time()
+                }
+
+            session = chat_sessions[user_id]
+            session["_last_access"] = time.time()
+
+            # 若使用者更換了提示詞，同步更新 system prompt
+            current_prompt = get_system_prompt(user_id)
+            if session["messages"][0]["content"] != current_prompt:
+                session["messages"][0]["content"] = current_prompt
+
+            session["messages"].append({"role": "user", "content": message})
+
+            # 保留 system prompt + 最近 10 則對話（20 則訊息）
+            if len(session["messages"]) > 21:
+                session["messages"] = [session["messages"][0]] + session["messages"][-20:]
+
+            messages = session["messages"]
+
+        answer = await ask_ai(messages)
+
+        with chat_sessions_lock:
+            if user_id in chat_sessions:
+                chat_sessions[user_id]["messages"].append(
+                    {"role": "assistant", "content": answer}
+                )
+                chat_sessions[user_id]["_last_access"] = time.time()
+
+        if len(answer) > 1900:
+            await send_long_message(ctx, answer)
+        else:
+            await ctx.reply(f"🤖 {answer}")
+
+    except Exception as e:
+        await ctx.reply(f"❌ 出錯：{str(e)[:500]}")
+
+
+@bot.command()
+async def reset(ctx):
+    """清除對話記憶"""
+    user_id = str(ctx.author.id)
+    with chat_sessions_lock:
+        if user_id in chat_sessions:
+            del chat_sessions[user_id]
+            await ctx.reply("🗑️ 對話記憶已清除！")
+        else:
+            await ctx.reply("ℹ️ 沒有對話記憶需要清除")
+
+
+@bot.command()
+async def prompt(ctx, *, action=""):
+    """自訂 AI 角色提示詞
+
+    用法：
+    !prompt              → 查看你目前的提示詞
+    !prompt <內容>       → 設定新的提示詞
+    !prompt reset        → 恢復預設提示詞
+    """
+    user_id = str(ctx.author.id)
+    action = action.strip()
+
+    if not action:
+        current = get_system_prompt(user_id)
+        status = "✏️ 自訂" if has_custom_prompt(user_id) else "📋 預設"
+        await ctx.reply(f"{status}提示詞：\n```\n{current}\n```")
+        return
+
+    if action.lower() == "reset":
+        reset_user_prompt(user_id)
+        await ctx.reply("🔄 已恢復為預設提示詞！")
+        return
+
+    if len(action) > 500:
+        await ctx.reply("⚠️ 提示詞太長了，請限制在 500 字以內。")
+        return
+
+    set_user_prompt(user_id, action)
+    await ctx.reply(f"✅ 已設定你的 AI 角色：\n```\n{action}\n```")
+
+
+@bot.command()
+async def helpme(ctx):
+    """顯示幫助訊息"""
+    help_text = (
+        "**🤖 Discord AI Bot 指令列表**\n\n"
+        "`!ask <問題>` — 單次問答（沒有對話記憶）\n"
+        "`!chat <訊息>` — 有記憶的連續對話\n"
+        "`!prompt <角色>` — 自訂 AI 角色（`!prompt reset` 恢復預設）\n"
+        "`!reset` — 清除你的對話記憶\n"
+        "`!helpme` — 顯示此幫助訊息\n"
+        "`!models` — 查看當前使用的 AI 模型\n"
+        f"\n🎯 當前模型：`{CURRENT_MODEL}`"
+    )
+    await ctx.reply(help_text)
+
+
+@bot.command()
+async def models(ctx):
+    """查看可用模型"""
+    model_list = "\n".join(f"• `{m}`" for m in FREE_MODELS[:10])
+    await ctx.reply(
+        f"🎯 **當前模型：** `{CURRENT_MODEL}`\n\n"
+        f"**可用免費模型：**\n{model_list}"
+    )
+
+
+# ========== 啟動 ==========
+if __name__ == "__main__":
+    start_web_server()
+    bot.run(DISCORD_TOKEN)
