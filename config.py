@@ -20,9 +20,24 @@ load_dotenv()
 # ========== API 金鑰 ==========
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY_API_KEY")
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API")
 
-# ========== OpenAI Client ==========
-client = OpenAI(
+# ========== 主要模型：DeepSeek ==========
+deepseek_client = None
+DEEPSEEK_MODELS = []
+
+if DEEPSEEK_API_KEY:
+    deepseek_client = OpenAI(
+        base_url="https://api.deepseek.com",
+        api_key=DEEPSEEK_API_KEY,
+    )
+    DEEPSEEK_MODELS = ["deepseek-chat", "deepseek-reasoner"]
+    print(f"🔷 DeepSeek API 已設定（{len(DEEPSEEK_MODELS)} 個模型）")
+else:
+    print("⚠️  DEEPSEEK_API 未設定，將直接使用 OpenRouter")
+
+# ========== 備用模型：OpenRouter ==========
+openrouter_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
 )
@@ -66,13 +81,25 @@ def get_free_models():
         return []
 
 # 取得免費模型列表
-FREE_MODELS = get_free_models()
-if not FREE_MODELS:
-    FREE_MODELS = DEFAULT_FREE_MODELS
-    print("⚠️ 使用預設備用模型")
+openrouter_models = get_free_models()
+if not openrouter_models:
+    openrouter_models = DEFAULT_FREE_MODELS
+    print("⚠️ 使用 OpenRouter 預設備用模型")
+
+# ========== 合併模型列表（DeepSeek 優先 → OpenRouter 備用）==========
+FREE_MODELS = DEEPSEEK_MODELS + openrouter_models
+
+# 模型 → 客戶端對應表
+MODEL_CLIENTS = {}
+for m in DEEPSEEK_MODELS:
+    if deepseek_client:
+        MODEL_CLIENTS[m] = deepseek_client
+for m in openrouter_models:
+    MODEL_CLIENTS[m] = openrouter_client
 
 CURRENT_MODEL = FREE_MODELS[0] if FREE_MODELS else None
 print(f"🎯 當前使用模型：{CURRENT_MODEL}")
+print(f"   DeepSeek: {len(DEEPSEEK_MODELS)} 個 | OpenRouter: {len(openrouter_models)} 個")
 
 # ========== 共用設定 ==========
 DEFAULT_SYSTEM_PROMPT = "你是一個有幫助的助手，用繁體中文回答。"

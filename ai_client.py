@@ -1,15 +1,20 @@
-"""AI 呼叫邏輯：與 OpenRouter API 互動"""
+"""AI 呼叫邏輯：DeepSeek 優先，OpenRouter 備用"""
 
 import asyncio
-from config import client, FREE_MODELS, executor
+from config import MODEL_CLIENTS, FREE_MODELS, executor
 
 
 def _ask_ai_sync(messages, model_index=0):
-    """同步版本：使用 messages 列表呼叫 AI，自動嘗試備用模型"""
+    """同步版本：依序嘗試 DeepSeek → OpenRouter 模型"""
     if model_index >= len(FREE_MODELS):
-        return "❌ 所有免費模型都暫時無法使用，請稍後再試。"
+        return "❌ 所有模型都暫時無法使用，請稍後再試。"
 
     model = FREE_MODELS[model_index]
+    client = MODEL_CLIENTS.get(model)
+
+    if client is None:
+        # 模型沒有對應的客戶端，跳過
+        return _ask_ai_sync(messages, model_index + 1)
 
     try:
         response = client.chat.completions.create(
@@ -24,8 +29,6 @@ def _ask_ai_sync(messages, model_index=0):
         print(f"⚠️ {model} 失敗：{error_msg[:150]}")
 
         # 任何錯誤都嘗試下一個模型
-        if any(x in error_msg.lower() for x in ["404", "400", "rate limit", "quota", "not a valid", "exceeded"]):
-            return _ask_ai_sync(messages, model_index + 1)
         return _ask_ai_sync(messages, model_index + 1)
 
 

@@ -5,11 +5,13 @@ import discord
 from discord.ext import commands
 
 from config import DISCORD_TOKEN, FREE_MODELS, CURRENT_MODEL
+from config import DEEPSEEK_API_KEY as _DS_KEY
 from web_server import start_web_server
 from ai_client import ask_ai, safe_typing, send_long_message
 from session_manager import (
     chat_sessions, chat_sessions_lock,
     cleanup_old_sessions,
+    restore_session, save_message, delete_session,
     get_system_prompt,
     set_user_prompt, reset_user_prompt,
     has_custom_prompt,
@@ -77,7 +79,7 @@ async def ask(ctx, *, question):
 
 @bot.command()
 async def chat(ctx, *, message):
-    """有記憶的對話"""
+    """有記憶的對話（跨重啟保留）"""
     user_id = str(ctx.author.id)
 
     await safe_typing(ctx)
@@ -86,12 +88,17 @@ async def chat(ctx, *, message):
             cleanup_old_sessions()
 
             if user_id not in chat_sessions:
-                chat_sessions[user_id] = {
-                    "messages": [
-                        {"role": "system", "content": get_system_prompt(user_id)}
-                    ],
-                    "_last_access": time.time()
-                }
+                # 嘗試從 DB 恢復舊對話
+                restored = restore_session(user_id)
+                if not restored:
+                    # 全新對話：建立 session 並儲存 system prompt
+                    chat_sessions[user_id] = {
+                        "messages": [
+                            {"role": "system", "content": get_system_prompt(user_id)}
+                        ],
+                        "_last_access": time.time()
+                    }
+                    save_message(user_id, "system", get_system_prompt(user_id))
 
             session = chat_sessions[user_id]
             session["_last_access"] = time.time()
@@ -100,8 +107,10 @@ async def chat(ctx, *, message):
             current_prompt = get_system_prompt(user_id)
             if session["messages"][0]["content"] != current_prompt:
                 session["messages"][0]["content"] = current_prompt
+                save_message(user_id, "system", current_prompt)
 
             session["messages"].append({"role": "user", "content": message})
+            save_message(user_id, "user", message)
 
             # 保留 system prompt + 最近 10 則對話（20 則訊息）
             if len(session["messages"]) > 21:
@@ -117,6 +126,7 @@ async def chat(ctx, *, message):
                     {"role": "assistant", "content": answer}
                 )
                 chat_sessions[user_id]["_last_access"] = time.time()
+                save_message(user_id, "assistant", answer)
 
         if len(answer) > 1900:
             await send_long_message(ctx, answer)
@@ -129,14 +139,15 @@ async def chat(ctx, *, message):
 
 @bot.command()
 async def reset(ctx):
-    """清除對話記憶"""
+    """清除對話記憶（記憶體 + DB）"""
     user_id = str(ctx.author.id)
     with chat_sessions_lock:
-        if user_id in chat_sessions:
-            del chat_sessions[user_id]
-            await ctx.reply("🗑️ 對話記憶已清除！")
-        else:
-            await ctx.reply("ℹ️ 沒有對話記憶需要清除")
+        has_session = user_id in chat_sessions
+    if has_session:
+        delete_session(user_id)
+        await ctx.reply("🗑️ 對話記憶已清除！")
+    else:
+        await ctx.reply("ℹ️ 沒有對話記憶需要清除")
 
 
 @bot.command()
@@ -189,10 +200,12 @@ async def helpme(ctx):
 @bot.command()
 async def models(ctx):
     """查看可用模型"""
-    model_list = "\n".join(f"• `{m}`" for m in FREE_MODELS[:10])
+    model_list = "\n".join(f"• `{m}`" for m in FREE_MODELS[:15])
+    source = "🔷 DeepSeek + OpenRouter" if _DS_KEY else "🌐 OpenRouter"
     await ctx.reply(
-        f"🎯 **當前模型：** `{CURRENT_MODEL}`\n\n"
-        f"**可用免費模型：**\n{model_list}"
+        f"🎯 **當前模型：** `{CURRENT_MODEL}`\n"
+        f"**來源：** {source}\n\n"
+        f"**可用模型：**\n{model_list}"
     )
 
 

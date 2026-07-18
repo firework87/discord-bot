@@ -7,6 +7,9 @@ __pycache__/
 # Environment
 .env
 
+# Database (runtime data)
+data/
+
 # IDE
 .vscode/
 .continue/
